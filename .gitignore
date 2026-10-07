@@ -1,0 +1,7 @@
+data/
+keys.md
+__pycache__/
+*.pyc
+.venv/
+.ipynb_checkpoints/
+fly.toml.bak

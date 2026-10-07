@@ -1,0 +1,15 @@
+data/
+keys.md
+.git/
+.github/
+agentic_search.ipynb
+*.db
+*.png
+*_interactive.html
+dashboard/
+docs/
+README.md
+.venv/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
