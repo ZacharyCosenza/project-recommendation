@@ -21,7 +21,8 @@ ANTHROPIC_KEY=sk-ant-...
 BRAVE_API=...
 ```
 
-No quotes, no spaces around `=`.
+No quotes, no spaces around `=`. Add `APP_PASSWORD=...` too if you want to be able to unlock editing
+(searching, retraining, labeling) from the sidebar; without it the app is read-only.
 
 ## 4. Install and run
 
@@ -33,6 +34,9 @@ streamlit run app.py
 ```
 
 Open http://localhost:8501. First run creates `data/events.db` automatically.
+
+Every tunable setting (search model, default queries, GP kernel, map size, idle timeouts, ...) lives in
+`config.yaml`; secrets never go there.
 
 ## Troubleshooting
 

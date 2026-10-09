@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 
 import numpy as np
 
-from .config import DB_PATH
+from . import config
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS run_log (
@@ -63,9 +63,9 @@ CREATE TABLE IF NOT EXISTS map_layout (
 
 
 def get_connection():
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    config.DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     # timeout: the background search and the page can write at the same moment
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=30)
+    conn = sqlite3.connect(config.DB_PATH, check_same_thread=False, timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA foreign_keys=ON;")

@@ -6,7 +6,6 @@ agentic_search.ipynb
 *.db
 *.png
 *_interactive.html
-dashboard/
 docs/
 README.md
 .venv/

@@ -8,3 +8,4 @@ streamlit>=1.38
 numpy>=1.26
 plotly>=5.24
 umap-learn>=0.5.7
+pyyaml>=6.0

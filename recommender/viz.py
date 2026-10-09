@@ -5,7 +5,9 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 
-MIN_MAP_POINTS = 5
+from . import config, db
+
+cfg = config.event_map
 GREY = "#9e9e9e"
 
 
@@ -26,9 +28,10 @@ def umap_coords(X):
     import umap
     n = len(X)
     reducer = umap.UMAP(
-        n_components=2, metric="cosine", n_neighbors=min(15, n - 1), min_dist=0.1,
+        n_components=2, metric=cfg.umap_metric, n_neighbors=min(cfg.umap_neighbors, n - 1),
+        min_dist=cfg.umap_min_dist, random_state=cfg.umap_random_state,
         # spectral init needs a reasonably connected graph; fall back for tiny datasets
-        init="spectral" if n > 15 else "random", random_state=42,
+        init="spectral" if n > cfg.umap_neighbors else "random",
     )
     return reducer.fit_transform(X)
 
@@ -36,7 +39,6 @@ def umap_coords(X):
 def map_coords(conn, df, X):
     # UMAP's first call per process spends ~20s compiling numba code, so the layout is computed when
     # the event set changes and stored, rather than on every page load.
-    from . import db
     stored = db.get_map_layout(conn)
     urls = df["url"].tolist()
     if stored and set(stored) == set(urls):
@@ -47,13 +49,13 @@ def map_coords(conn, df, X):
 
 
 def refresh_map_layout(conn):
-    from . import db
     df = to_frame(db.all_events(conn))
-    if len(df) >= MIN_MAP_POINTS:
+    if len(df) >= cfg.min_points:
         map_coords(conn, df, np.stack(df["embedding"].to_numpy()))
 
 
-def ei_surface(coords, ei, grid=120, bandwidth_frac=0.045, min_weight=0.2):
+def ei_surface(coords, ei, grid=cfg.surface_grid, bandwidth_frac=cfg.surface_bandwidth_frac,
+               min_weight=cfg.surface_min_weight):
     # EI only exists at the events (it's computed in embedding space), so the surface is a
     # Gaussian-weighted average of nearby events' EI, fading to 0 where no event is close enough.
     lo, hi = coords.min(0), coords.max(0)
@@ -109,7 +111,7 @@ def event_map(df, coords, recent_mask, ei=None):
         hovertext=[h for h, m in zip(hover, recent_mask) if m], hoverinfo="text",
     ))
     fig.update_layout(
-        template="ggplot2", plot_bgcolor="white", width=512, height=470,
+        template="ggplot2", plot_bgcolor="white", width=cfg.width, height=cfg.height,
         margin=dict(l=10, r=10, t=40, b=10),
         legend=dict(orientation="h", yanchor="bottom", y=1.01, x=0),
         hoverlabel=dict(align="left"),
@@ -119,24 +121,3 @@ def event_map(df, coords, recent_mask, ei=None):
     fig.update_xaxes(**frame)
     fig.update_yaxes(**frame)
     return fig
-
-
-def _safe_link(url):
-    if not str(url).startswith(("http://", "https://")):
-        return ""
-    return f'<a href="{html.escape(url, quote=True)}" rel="noopener noreferrer" target="_blank">link</a>'
-
-
-def events_table_html(df, ei=None):
-    df = df.assign(ei=ei if ei is not None else np.nan)
-    if ei is not None:
-        df = df.sort_values("ei", ascending=False)
-    rows = []
-    for _, r in df.iterrows():
-        score = "—" if np.isnan(r["ei"]) else f"{r['ei']:.3f}"
-        rows.append(
-            f"<tr><td>{score}</td><td>{html.escape(r['theme'])}</td><td>{html.escape(r['city'])}</td>"
-            f"<td>{html.escape(r['description'])}</td><td>{_label(r['label'])}</td><td>{_safe_link(r['url'])}</td></tr>"
-        )
-    return ("<table><thead><tr><th>EI</th><th>Theme</th><th>City</th><th>Event</th><th>Label</th><th></th>"
-            "</tr></thead><tbody>" + "".join(rows) + "</tbody></table>")

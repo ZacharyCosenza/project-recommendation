@@ -37,10 +37,35 @@ If you ever do run `fly launch`, double check it hasn't rewritten `fly.toml` and
 - `fly deploy --app event-recommender` — redeploy after code changes.
 - `fly ssh console --app event-recommender` then `ls -la /app/data` — confirm `events.db` is landing on the mounted volume, not the ephemeral root filesystem.
 
-## Publishing a public snapshot
+## Sharing the site
 
-The live app never holds GitHub credentials. The GitHub repo (https://github.com/ZacharyCosenza/project-recommendation) and its Pages setup are already in place — `.github/workflows/pages.yml` deploys whatever's in `dashboard/` on every push to `main`. To publish an update:
+The live URL is the showcase: anyone with the link gets a read-only view (EI map, ranked events, live
+search progress). Editing — running searches, retraining, labeling, run history — unlocks per browser tab
+with a password set as a Fly secret, so it never lives in the code or the repo:
 
-1. In the running app, click **Generate public snapshot**, then **Download snapshot.zip**.
-2. Locally: `unzip -o snapshot.zip -d dashboard/`, then `git add dashboard/ && git commit -m "snapshot" && git push`.
-3. The Pages workflow runs automatically on that push; the published URL is under the repo's Settings → Pages.
+```bash
+fly secrets set APP_PASSWORD='something-long' --app event-recommender
+```
+
+Without `APP_PASSWORD` the site stays read-only for everyone. Five wrong attempts (from anyone, in any
+tab) lock unlocking for 10 minutes. Any tab — visitor or owner — swaps itself for a static "Paused" page
+after 15 minutes without mouse/keyboard/scroll activity (`app.idle_pause_seconds` in `config.yaml`), because an open
+Streamlit tab keeps reconnecting and would otherwise keep the machine running. Searches already in
+progress keep running.
+
+## Pausing and resuming
+
+To pause without losing anything (app name, volume and secrets are kept; only the ~$0.15/month volume is billed):
+
+```bash
+fly ssh console --app event-recommender -C "python3 -c \"import sqlite3; s=sqlite3.connect('/app/data/events.db'); d=sqlite3.connect('/tmp/b.db'); s.backup(d)\""
+fly ssh sftp get /tmp/b.db data/events_backup_$(date +%F).db --app event-recommender   # optional local backup
+fly scale count 0 --app event-recommender --yes
+```
+
+With zero machines nothing can wake the app, even with `auto_start_machines` on. To resume, deploy again —
+it creates a new machine and reattaches the existing `data_volume`, so all events, labels and models come back:
+
+```bash
+fly deploy --app event-recommender
+```

@@ -1,0 +1,67 @@
+# Tunable settings. Secrets (ANTHROPIC_KEY, BRAVE_API, APP_PASSWORD) come from the environment or keys.md.
+
+paths:
+  db: data/events.db
+  heartbeat: /tmp/app-heartbeat
+
+search:
+  model: claude-sonnet-5-5
+  max_tokens: 4096
+  max_brave_calls: 4
+  brave_results: 10
+  brave_timeout_seconds: 10
+  input_cost_per_mtok: 2.0
+  output_cost_per_mtok: 10.0
+  default_location: Chicago
+  default_days_ahead: 7
+  default_queries:
+    - {text: concerts, max_results: 5}
+    - {text: classical music concerts, max_results: 5}
+    - {text: art gallery shows, max_results: 5}
+    - {text: museum exhibits, max_results: 5}
+    - {text: block parties and street fairs, max_results: 5}
+    - {text: comedy shows, max_results: 5}
+    - {text: theater and broadway shows, max_results: 5}
+    - {text: food festivals, max_results: 5}
+    - {text: nightlife and club events, max_results: 5}
+    - {text: sports games, max_results: 5}
+
+model:
+  embedding: all-MiniLM-L6-v2
+  min_events_to_train: 4
+  kernel_constant: 1.0
+  kernel_length_scale: 1.0
+  kernel_noise: 0.3
+  optimizer_restarts: 3
+  random_state: 42
+  ei_xi: 0.01
+
+event_map:
+  min_points: 5
+  umap_neighbors: 15
+  umap_min_dist: 0.1
+  umap_metric: cosine
+  umap_random_state: 42
+  surface_grid: 120
+  surface_bandwidth_frac: 0.045
+  surface_min_weight: 0.2
+  width: 512
+  height: 470
+
+app:
+  idle_pause_seconds: 900
+  seconds_per_query: 30
+  cost_per_query: 0.065
+  table_height: 560
+  page_size: 50
+  paused_page: /app/static/paused.html
+
+auth:
+  max_failures: 5
+  window_seconds: 600
+
+server:
+  port: 8501
+  idle_shutdown_seconds: 600
+  check_seconds: 30
+  heartbeat_fresh_seconds: 90
