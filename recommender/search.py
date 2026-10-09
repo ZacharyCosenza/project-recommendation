@@ -85,19 +85,8 @@ def refine_search(topic, location, date_start, date_end, max_results=5):
     return json.loads(text), total_input, total_output
 
 
-def search_city(query_rows, location, date_start, date_end):
-    results = {}
-    total_input, total_output = 0, 0
-    for row in query_rows:
-        topic = row["text"].strip()
-        if not topic:
-            continue
-        max_results = int(row["max_results"])
-        output, in_tok, out_tok = refine_search(topic, location, date_start, date_end, max_results=max_results)
-        for url, description in output.items():
-            results[url] = {"description": description, "theme": topic, "query_text": topic}
-        total_input += in_tok
-        total_output += out_tok
-    cost = total_input / 1e6 * INPUT_COST_PER_MTOK + total_output / 1e6 * OUTPUT_COST_PER_MTOK
-    usage = {"input_tokens": total_input, "output_tokens": total_output, "cost_usd": cost}
-    return results, usage
+def search_query(topic, location, date_start, date_end, max_results=5):
+    output, in_tok, out_tok = refine_search(topic, location, date_start, date_end, max_results=max_results)
+    results = {url: {"description": d, "theme": topic, "query_text": topic} for url, d in output.items()}
+    cost = in_tok / 1e6 * INPUT_COST_PER_MTOK + out_tok / 1e6 * OUTPUT_COST_PER_MTOK
+    return results, {"input_tokens": in_tok, "output_tokens": out_tok, "cost_usd": cost}

@@ -7,11 +7,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# sentence-transformers pulls the CUDA build of torch (~2GB) by default; this machine has no GPU.
+RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu \
+    && pip install --no-cache-dir -r requirements.txt
 
 COPY recommender/ recommender/
-COPY app.py .
+COPY app.py serve.py ./
 
 RUN mkdir -p data
 
-CMD ["streamlit", "run", "app.py", "--server.port=8501", "--server.address=0.0.0.0"]
+CMD ["python", "serve.py"]

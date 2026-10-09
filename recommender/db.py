@@ -52,12 +52,20 @@ CREATE TABLE IF NOT EXISTS models (
     model_blob        BLOB NOT NULL,
     sklearn_version   TEXT
 );
+
+CREATE TABLE IF NOT EXISTS map_layout (
+    url          TEXT PRIMARY KEY REFERENCES events(url) ON DELETE CASCADE,
+    x            REAL NOT NULL,
+    y            REAL NOT NULL,
+    computed_at  TEXT NOT NULL
+);
 """
 
 
 def get_connection():
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    # timeout: the background search and the page can write at the same moment
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA foreign_keys=ON;")
@@ -66,7 +74,26 @@ def get_connection():
 
 def init_db(conn):
     conn.executescript(SCHEMA)
+    columns = {r["name"] for r in conn.execute("PRAGMA table_info(run_log)")}
+    if "queries_done" not in columns:
+        conn.execute("ALTER TABLE run_log ADD COLUMN queries_done INTEGER NOT NULL DEFAULT 0")
     conn.commit()
+
+
+def set_queries_done(conn, run_id, n):
+    conn.execute("UPDATE run_log SET queries_done=? WHERE id=?", (n, run_id))
+    conn.commit()
+
+
+def active_run(conn):
+    return conn.execute(
+        "SELECT id, started_at, location, queries_json, queries_done, cost_usd, total_event_count "
+        "FROM run_log WHERE status='running' ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+
+
+def get_run(conn, run_id):
+    return conn.execute("SELECT * FROM run_log WHERE id=?", (run_id,)).fetchone()
 
 
 def _now():
@@ -84,18 +111,48 @@ def start_run(conn, location, date_start, date_end, query_rows):
     return cur.lastrowid
 
 
-def finish_run(conn, run_id, status, usage=None, new_event_count=None, total_event_count=None, error=None):
-    usage = usage or {}
+def run_counts(conn, run_id):
+    total = conn.execute("SELECT COUNT(*) FROM events WHERE run_id=?", (run_id,)).fetchone()[0]
+    new = conn.execute("SELECT COUNT(*) FROM events WHERE first_run_id=?", (run_id,)).fetchone()[0]
+    return new, total
+
+
+def update_run_progress(conn, run_id, usage):
+    new, total = run_counts(conn, run_id)
     conn.execute(
-        "UPDATE run_log SET finished_at=?, status=?, input_tokens=?, output_tokens=?, cost_usd=?, "
-        "new_event_count=?, total_event_count=?, error=? WHERE id=?",
-        (
-            _now(), status,
-            usage.get("input_tokens"), usage.get("output_tokens"), usage.get("cost_usd"),
-            new_event_count, total_event_count, error, run_id,
-        ),
+        "UPDATE run_log SET input_tokens=?, output_tokens=?, cost_usd=?, new_event_count=?, total_event_count=? "
+        "WHERE id=?",
+        (usage["input_tokens"], usage["output_tokens"], usage["cost_usd"], new, total, run_id),
     )
     conn.commit()
+    return new, total
+
+
+def finish_run(conn, run_id, status, usage, error=None):
+    update_run_progress(conn, run_id, usage)
+    conn.execute(
+        "UPDATE run_log SET finished_at=?, status=?, error=? WHERE id=?",
+        (_now(), status, error, run_id),
+    )
+    conn.commit()
+
+
+def fail_stale_runs(conn):
+    # Single process: any run still 'running' when the app starts was killed mid-run.
+    conn.execute(
+        "UPDATE run_log SET status='failed', finished_at=?, error='interrupted: app stopped before the run finished' "
+        "WHERE status='running'",
+        (_now(),),
+    )
+    conn.commit()
+
+
+def recent_runs(conn, limit=10):
+    return conn.execute(
+        "SELECT id, started_at, finished_at, status, location, date_start, date_end, cost_usd, "
+        "new_event_count, total_event_count, error FROM run_log ORDER BY id DESC LIMIT ?",
+        (limit,),
+    ).fetchall()
 
 
 def insert_events(conn, run_id, location, results, embeddings):
@@ -127,10 +184,6 @@ def insert_events(conn, run_id, location, results, embeddings):
         rows,
     )
     conn.commit()
-    new_count = conn.execute(
-        "SELECT COUNT(*) FROM events WHERE run_id=? AND first_run_id=?", (run_id, run_id)
-    ).fetchone()[0]
-    return new_count, len(urls)
 
 
 def total_cost(conn):
@@ -142,17 +195,28 @@ def list_cities(conn):
     return [r[0] for r in conn.execute("SELECT DISTINCT city FROM events ORDER BY city")]
 
 
-def get_latest_run_events(conn):
+EVENT_COLUMNS = (
+    "url, run_id, city, theme, query_text, description, embedding, embedding_dim, label, "
+    "label_updated_at, found_at, created_at"
+)
+
+
+def latest_run_id(conn):
     row = conn.execute(
-        "SELECT id FROM run_log WHERE status='completed' ORDER BY started_at DESC LIMIT 1"
+        "SELECT id FROM run_log WHERE total_event_count > 0 ORDER BY id DESC LIMIT 1"
     ).fetchone()
-    if row is None:
+    return row["id"] if row else None
+
+
+def get_latest_run_events(conn):
+    run_id = latest_run_id(conn)
+    if run_id is None:
         return []
-    return conn.execute(
-        "SELECT url, city, theme, query_text, description, embedding, embedding_dim, label, "
-        "label_updated_at, found_at, created_at FROM events WHERE run_id=?",
-        (row["id"],),
-    ).fetchall()
+    return conn.execute(f"SELECT {EVENT_COLUMNS} FROM events WHERE run_id=?", (run_id,)).fetchall()
+
+
+def all_events(conn):
+    return conn.execute(f"SELECT {EVENT_COLUMNS} FROM events ORDER BY created_at").fetchall()
 
 
 def browse_events(conn, city=None, label=None, page=1, page_size=50):
@@ -165,11 +229,7 @@ def browse_events(conn, city=None, label=None, page=1, page_size=50):
         params.append(label)
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     offset = (page - 1) * page_size
-    query = (
-        f"SELECT url, city, theme, query_text, description, embedding, embedding_dim, label, "
-        f"label_updated_at, found_at, created_at FROM events {where} "
-        f"ORDER BY created_at DESC LIMIT ? OFFSET ?"
-    )
+    query = f"SELECT {EVENT_COLUMNS} FROM events {where} ORDER BY created_at DESC LIMIT ? OFFSET ?"
     return conn.execute(query, (*params, page_size, offset)).fetchall()
 
 
@@ -177,5 +237,19 @@ def update_label(conn, url, label):
     conn.execute(
         "UPDATE events SET label=?, label_updated_at=? WHERE url=?",
         (label, _now(), url),
+    )
+    conn.commit()
+
+
+def get_map_layout(conn):
+    return {r["url"]: (r["x"], r["y"]) for r in conn.execute("SELECT url, x, y FROM map_layout")}
+
+
+def save_map_layout(conn, urls, coords):
+    now = _now()
+    conn.execute("DELETE FROM map_layout")
+    conn.executemany(
+        "INSERT INTO map_layout (url, x, y, computed_at) VALUES (?,?,?,?)",
+        [(u, float(x), float(y), now) for u, (x, y) in zip(urls, coords)],
     )
     conn.commit()

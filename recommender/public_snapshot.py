@@ -1,82 +1,82 @@
+import html
 import io
-import json
 import zipfile
 from datetime import datetime, timezone
 
 import numpy as np
-import plotly.graph_objects as go
 
-from . import preference
+from . import db, preference, viz
 
 SNAPSHOT_TEMPLATE = """<!doctype html>
 <html>
 <head>
 <meta charset="utf-8">
-<title>Event Recommender — public snapshot</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Event Recommender</title>
 <style>
-body {{ font-family: -apple-system, sans-serif; max-width: 1100px; margin: 2rem auto; padding: 0 1rem; }}
-.card {{ border: 1px solid #ddd; border-radius: 8px; padding: 1rem 1.5rem; margin-bottom: 1.5rem; background: #fafafa; }}
-.card h2 {{ margin-top: 0; font-size: 1rem; color: #555; }}
+body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; max-width: 1200px;
+        margin: 2rem auto; padding: 0 1rem; color: #222; }}
+p.lede {{ color: #444; max-width: 760px; }}
+.card {{ border: 1px solid #ddd; border-radius: 8px; padding: 0.75rem 1.25rem; margin: 1.5rem 0; background: #fafafa; }}
+.card span {{ margin-right: 2rem; }}
+table {{ border-collapse: collapse; width: 100%; font-size: 0.9rem; margin-top: 1rem; }}
+th, td {{ text-align: left; padding: 0.45rem 0.6rem; border-bottom: 1px solid #eee; vertical-align: top; }}
+th {{ background: #f3f3f3; }}
+td:first-child, td:nth-child(5) {{ white-space: nowrap; font-variant-numeric: tabular-nums; }}
+.muted {{ color: #777; font-size: 0.85rem; }}
 </style>
 </head>
 <body>
-<h1>Event Recommender — snapshot</h1>
-<p>Generated {generated_at}</p>
+<h1>Event Recommender</h1>
+<p class="lede">An agent searches the web for upcoming events, each event description is embedded, and a
+Gaussian process trained on my likes and dislikes scores new events by Expected Improvement — how likely each
+one is to beat the best thing I've liked so far, rewarding events the model is still unsure about.</p>
 <div class="card">
-<h2>Model status</h2>
-<p>Trained: {trained_at}</p>
-<p>Events used in training: {n_labeled}</p>
-<p>Label distribution: {label_dist}</p>
+<span><b>Model trained:</b> {trained_at}</span>
+<span><b>Events in training:</b> {n_labeled}</span>
+<span><b>Labels (-1 / 0 / +1):</b> {label_dist}</span>
 </div>
-{chart_html}
+<h2>Event map</h2>
+<p class="muted">Each dot is an event, placed by how similar its description is to the others (UMAP, cosine
+distance). The background is Expected Improvement interpolated from every event — brighter means more worth
+trying next; the darkest areas include places with no events nearby. White dots are the most recent search, grey are earlier ones. Hover a dot for details.</p>
+{map_html}
+<h2>Most recent search, ranked by EI</h2>
+{table_html}
+<p class="muted">Snapshot generated {generated_at}</p>
 </body>
 </html>
 """
 
 
-def _short(desc, n=90):
-    return desc if len(desc) <= n else desc[:n].rsplit(" ", 1)[0] + "..."
-
-
 def build_snapshot(conn):
-    from . import db
-
     gp, model_meta = preference.load_current_model(conn)
-    events = db.get_latest_run_events(conn)
+    df = viz.to_frame(db.all_events(conn))
+    recent_id = db.latest_run_id(conn)
 
-    if gp is not None and events:
-        X = np.stack([np.frombuffer(e["embedding"], dtype=np.float32) for e in events])
-        ei = preference.expected_improvement(gp, X, model_meta["y_best"])
+    if df.empty:
+        map_html, table_html = "<p>No events yet.</p>", ""
     else:
-        ei = np.zeros(len(events))
+        X = np.stack(df["embedding"].to_numpy())
+        ei = preference.expected_improvement(gp, X, model_meta["y_best"]) if gp is not None else None
+        recent_mask = (df["run_id"] == recent_id).to_numpy()
 
-    order = np.argsort(-ei)
-    descriptions = [_short(events[i]["description"]) for i in order]
-    themes = [events[i]["theme"] for i in order]
-    ei_sorted = [float(ei[i]) for i in order]
+        if len(df) >= viz.MIN_MAP_POINTS:
+            fig = viz.event_map(df, viz.map_coords(conn, df, X), recent_mask, ei)
+            map_html = fig.to_html(include_plotlyjs="cdn", full_html=False)
+        else:
+            map_html = f"<p>Need at least {viz.MIN_MAP_POINTS} events to draw the map.</p>"
+        recent_ei = ei[recent_mask] if ei is not None else None
+        table_html = viz.events_table_html(df[recent_mask], recent_ei)
 
-    fig = go.Figure(go.Bar(
-        x=ei_sorted,
-        y=descriptions,
-        orientation="h",
-        customdata=list(zip(themes, descriptions)),
-        hovertemplate="<b>%{customdata[0]}</b><br>%{customdata[1]}<br>EI: %{x:.3f}<extra></extra>",
-    ))
-    fig.update_layout(
-        template="ggplot2",
-        title="Top events by Expected Improvement (most recent search run)",
-        height=max(400, 24 * len(descriptions)),
-        margin=dict(l=320),
-        yaxis=dict(autorange="reversed"),
-    )
-    chart_html = fig.to_html(include_plotlyjs="cdn", full_html=False) if descriptions else "<p>No events yet.</p>"
-
+    label_dist = " / ".join(str(model_meta["label_counts"].get(k, 0)) for k in ("-1", "0", "1")) if model_meta else "—"
     index_html = SNAPSHOT_TEMPLATE.format(
-        generated_at=datetime.now(timezone.utc).isoformat(),
-        trained_at=model_meta["trained_at"] if model_meta else "never",
+        generated_at=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
+        trained_at=html.escape(model_meta["trained_at"][:16].replace("T", " ")) if model_meta else "not yet",
         n_labeled=model_meta["n_events"] if model_meta else 0,
-        label_dist=json.dumps(model_meta["label_counts"]) if model_meta else "{}",
-        chart_html=chart_html,
+        label_dist=label_dist,
+        map_html=map_html,
+        table_html=table_html,
     )
 
     buf = io.BytesIO()
