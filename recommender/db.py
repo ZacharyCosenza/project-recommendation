@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS events (
     embedding_dim     INTEGER NOT NULL,
     label             INTEGER NOT NULL DEFAULT 0 CHECK (label IN (-1, 0, 1)),
     label_updated_at  TEXT,
+    context           TEXT NOT NULL DEFAULT '',
     found_at          TEXT NOT NULL,
     created_at        TEXT NOT NULL
 );
@@ -59,6 +60,15 @@ CREATE TABLE IF NOT EXISTS map_layout (
     y            REAL NOT NULL,
     computed_at  TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS explanations (
+    url          TEXT NOT NULL REFERENCES events(url) ON DELETE CASCADE,
+    model_id     INTEGER NOT NULL REFERENCES models(id) ON DELETE CASCADE,
+    tokens_json  TEXT NOT NULL,
+    values_json  TEXT NOT NULL,
+    base_value   REAL NOT NULL,
+    PRIMARY KEY (url, model_id)
+);
 """
 
 
@@ -77,6 +87,8 @@ def init_db(conn):
     columns = {r["name"] for r in conn.execute("PRAGMA table_info(run_log)")}
     if "queries_done" not in columns:
         conn.execute("ALTER TABLE run_log ADD COLUMN queries_done INTEGER NOT NULL DEFAULT 0")
+    if "context" not in {r["name"] for r in conn.execute("PRAGMA table_info(events)")}:
+        conn.execute("ALTER TABLE events ADD COLUMN context TEXT NOT NULL DEFAULT ''")
     conn.commit()
 
 
@@ -155,28 +167,36 @@ def recent_runs(conn, limit=10):
     ).fetchall()
 
 
-def insert_events(conn, run_id, location, results, embeddings):
+def get_contexts(conn, urls):
+    if not urls:
+        return {}
+    marks = ",".join("?" * len(urls))
+    return dict(conn.execute(f"SELECT url, context FROM events WHERE url IN ({marks})", list(urls)).fetchall())
+
+
+def insert_events(conn, run_id, location, results, embeddings, contexts):
     now = _now()
     urls = list(results.keys())
     rows = [
         (
             url, run_id, run_id, location,
-            results[url]["theme"], results[url]["query_text"], results[url]["description"],
+            results[url]["theme"], results[url]["query_text"], results[url]["description"], contexts[i],
             embeddings[i].astype(np.float32).tobytes(), embeddings.shape[1], now, now,
         )
         for i, url in enumerate(urls)
     ]
     conn.executemany(
         """
-        INSERT INTO events (url, run_id, first_run_id, city, theme, query_text, description,
+        INSERT INTO events (url, run_id, first_run_id, city, theme, query_text, description, context,
                              embedding, embedding_dim, found_at, created_at)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(url) DO UPDATE SET
             run_id = excluded.run_id,
             city = excluded.city,
             theme = excluded.theme,
             query_text = excluded.query_text,
             description = excluded.description,
+            context = excluded.context,
             embedding = excluded.embedding,
             embedding_dim = excluded.embedding_dim,
             found_at = excluded.found_at
@@ -196,7 +216,7 @@ def list_cities(conn):
 
 
 EVENT_COLUMNS = (
-    "url, run_id, city, theme, query_text, description, embedding, embedding_dim, label, "
+    "url, run_id, city, theme, query_text, description, context, embedding, embedding_dim, label, "
     "label_updated_at, found_at, created_at"
 )
 
@@ -252,4 +272,28 @@ def save_map_layout(conn, urls, coords):
         "INSERT INTO map_layout (url, x, y, computed_at) VALUES (?,?,?,?)",
         [(u, float(x), float(y), now) for u, (x, y) in zip(urls, coords)],
     )
+    conn.commit()
+
+
+def get_explanation(conn, url, model_id):
+    row = conn.execute(
+        "SELECT tokens_json, values_json, base_value FROM explanations WHERE url=? AND model_id=?", (url, model_id)
+    ).fetchone()
+    if row is None:
+        return None
+    return json.loads(row["tokens_json"]), json.loads(row["values_json"]), row["base_value"]
+
+
+def save_explanation(conn, url, model_id, tokens, values, base_value):
+    conn.execute(
+        "INSERT OR REPLACE INTO explanations (url, model_id, tokens_json, values_json, base_value) VALUES (?,?,?,?,?)",
+        (url, model_id, json.dumps(tokens), json.dumps(values), base_value),
+    )
+    conn.commit()
+
+
+def update_context(conn, url, context, embedding):
+    conn.execute("UPDATE events SET context=?, embedding=?, embedding_dim=? WHERE url=?",
+                 (context, embedding.astype(np.float32).tobytes(), len(embedding), url))
+    conn.execute("DELETE FROM explanations WHERE url=?", (url,))
     conn.commit()

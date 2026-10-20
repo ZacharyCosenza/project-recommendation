@@ -1,12 +1,11 @@
 import json
 from datetime import date, timedelta
-from functools import partial
 
 import numpy as np
 import pandas as pd
 import streamlit as st
 
-from recommender import config, db, model, search, session, viz
+from recommender import config, db, explain, model, search, session, viz
 
 st.set_page_config(page_title="Event Recommender", layout="wide")
 
@@ -83,22 +82,75 @@ if (!p.__idlePauseInstalled) {{
 </script>""", height=1)
 
 
-def render_event_map(gp, model_meta):
+def selected_url(chart_event):
+    points = chart_event.selection.get("points", []) if chart_event else []
+    urls = [pt["customdata"] for pt in points if pt.get("customdata")]
+    return urls[0] if urls else None
+
+
+def event_card(gp, model_meta, event, score, editable):
+    st.markdown(f"**{event['theme']}** · {event['city']} · label {LABEL_ICON[event['label']]}")
+    if editable:
+        with st.form(f"context_{event['url']}", border=False):
+            new_context = st.text_input("Context", value=event["context"],
+                                        placeholder="e.g. Friday, comedy show", help=CONTEXT_HELP)
+            if st.form_submit_button("Save context") and new_context.strip() != event["context"]:
+                save_context(event["url"], event["description"], new_context.strip())
+                st.rerun()
+    elif event["context"]:
+        st.caption(f"Context: {event['context']}")
+    if gp is None:
+        st.caption("Word highlighting appears once a model is trained.")
+        st.write(model.event_text(event["description"], event["context"]))
+    else:
+        st.caption(f"P(like) {score:.0%}")
+        with st.spinner("Explaining this event (the first time takes a few seconds)..."):
+            tokens, values, base = explain.word_attributions(conn, gp, model_meta["id"], event)
+        st.html(viz.highlight_html(tokens, values, config.explain.color_floor))
+        st.caption(f"Blue words push P(like) up and red words push it down, measured against the same text with "
+                   f"words removed (baseline {base:.0%}). Hover a word for its value. This shows what the model is "
+                   "sensitive to, not why you like something.")
+    if event["url"].startswith(("http://", "https://")):
+        st.markdown(f"[Open event page]({event['url']})")
+    if editable:
+        cols = st.columns(len(CARD_LABELS))
+        for col, (name, value) in zip(cols, CARD_LABELS.items()):
+            if col.button(name, key=f"card_{name}", disabled=event["label"] == value):
+                db.update_label(conn, event["url"], value)
+                st.rerun()
+
+
+@st.fragment
+def map_section(gp, model_meta, editable):
+    # A fragment, so clicking a dot reruns only the map and card.
     df = viz.to_frame(db.all_events(conn))
     if len(df) < config.event_map.min_points:
         st.caption(f"The map appears once there are at least {config.event_map.min_points} events (have {len(df)}).")
         return
     X = np.stack(df["embedding"].to_numpy())
-    ei = model.expected_improvement(gp, X, model_meta["y_best"]) if gp is not None else None
+    scores = model.p_like(gp, X) if gp is not None else None
     recent_mask = (df["run_id"] == db.latest_run_id(conn)).to_numpy()
     with st.spinner("Laying out event map (first time after new events takes ~20s)..."):
         coords = viz.map_coords(conn, df, X)
-    st.plotly_chart(viz.event_map(df, coords, recent_mask, ei), width="content")
-    st.caption("Events laid out by description similarity (UMAP, cosine). "
-               + ("Background is EI interpolated from every event — a reading aid; the model only scores "
-                  "the events themselves, and the darkest areas include places with no events nearby. "
-                  if gp is not None else "The EI background appears once a model is trained. ")
-               + "White dots are the most recent search, grey are earlier. Hover a dot for details.")
+
+    map_col, card_col = st.columns([5, 4])
+    with map_col:
+        chart_event = st.plotly_chart(viz.event_map(df, coords, recent_mask, scores),
+                                      width="content", key="event_map", on_select="rerun", selection_mode="points")
+        st.caption("Events laid out by similarity of description + context (UMAP, cosine). "
+                   + ("Background is P(like) interpolated from every event — a reading aid; the model only scores "
+                      "the events themselves, and the darkest areas include places with no events nearby. "
+                      if gp is not None else "The P(like) background appears once a model is trained. ")
+                   + "White dots are the most recent search, grey are earlier.")
+    with card_col:
+        # Labeling from the card rebuilds the chart, which clears its selection; keep showing the same event.
+        url = selected_url(chart_event) or st.session_state.get("card_url")
+        st.session_state.card_url = url
+        if url is None or url not in set(df["url"]):
+            st.info("Click a dot to see why the model scores that event the way it does.")
+            return
+        i = int(np.flatnonzero(df["url"].to_numpy() == url)[0])
+        event_card(gp, model_meta, df.iloc[i], scores[i] if scores is not None else None, editable)
 
 
 def model_status_text(meta):
@@ -136,17 +188,34 @@ def search_status():
 
 
 LABEL_ICON = {1: "👍", -1: "👎", 0: "—"}
-BRUSHES = {"👍 Like": 1, "👎 Dislike": -1, "Clear": 0}
+CARD_LABELS = {"👍 Like": 1, "👎 Dislike": -1, "Clear": 0}
+CONTEXT_HELP = ("Added to the description before embedding. Auto-filled with the day of the week and the type "
+                "of event when the description says so; edit it to tell the model what matters to you.")
 
 
-def apply_brush(key, urls):
+def save_context(url, description, context):
+    db.update_context(conn, url, context, model.embed_events([description], [context])[0])
+
+
+def apply_table_edits(key, events_df):
     if not st.session_state.get("owner"):
         return
-    rows = st.session_state[key].selection.rows
-    brush = st.session_state.get("brush")
-    if rows and brush:
-        for i in rows:
-            db.update_label(conn, urls[i], BRUSHES[brush])
+    for i, change in st.session_state[key]["edited_rows"].items():
+        row = events_df.iloc[int(i)]
+        like = change.get("👍", row["label"] == 1)
+        dislike = change.get("👎", row["label"] == -1)
+        # Ticking one box clears the other: whichever box was just changed wins.
+        if "👍" in change and like:
+            label = 1
+        elif "👎" in change and dislike:
+            label = -1
+        else:
+            label = 1 if like else -1 if dislike else 0
+        if label != row["label"]:
+            db.update_label(conn, row["url"], label)
+        context = change.get("Context", row["context"]).strip()
+        if context != row["context"]:
+            save_context(row["url"], row["description"], context)
 
 
 def render_event_table(gp, model_meta, events_df, editable, key):
@@ -156,35 +225,39 @@ def render_event_table(gp, model_meta, events_df, editable, key):
 
     if gp is not None:
         X = np.stack(events_df["embedding"].to_numpy())
-        ei = model.expected_improvement(gp, X, model_meta["y_best"])
-        events_df = events_df.assign(ei=ei).sort_values("ei", ascending=False)
+        events_df = events_df.assign(p_like=model.p_like(gp, X)).sort_values("p_like", ascending=False)
     else:
-        events_df = events_df.assign(ei=np.nan)
+        events_df = events_df.assign(p_like=np.nan)
     events_df = events_df.reset_index(drop=True)
 
-    table = pd.DataFrame({
-        "Label": events_df["label"].map(LABEL_ICON),
-        "EI": events_df["ei"],
-        "Theme": events_df["theme"],
-        "City": events_df["city"],
-        "Event": events_df["description"],
-        "Link": events_df["url"].where(events_df["url"].str.startswith(("http://", "https://")), None),
-    })
+    link = events_df["url"].where(events_df["url"].str.startswith(("http://", "https://")), None)
     column_config = {
-        "Label": st.column_config.TextColumn("Label", width="small"),
-        "EI": st.column_config.NumberColumn("EI", format="%.3f", width="small"),
+        "P(like)": st.column_config.ProgressColumn("P(like)", format="percent", min_value=0, max_value=1,
+                                                   width="small", help="The classifier's probability of 👍"),
+        "Context": st.column_config.TextColumn("Context", width="medium", help=CONTEXT_HELP),
         "Event": st.column_config.TextColumn("Event", width="large"),
         "Link": st.column_config.LinkColumn("Link", display_text="open", width="small"),
     }
 
     if not editable:
+        table = pd.DataFrame({"Label": events_df["label"].map(LABEL_ICON), "P(like)": events_df["p_like"],
+                              "Theme": events_df["theme"], "City": events_df["city"],
+                              "Context": events_df["context"], "Event": events_df["description"], "Link": link})
+        column_config["Label"] = st.column_config.TextColumn("Label", width="small")
         st.dataframe(table, column_config=column_config, hide_index=True, height=cfg.table_height)
         return
 
-    st.segmented_control("Clicking a row marks it as", list(BRUSHES), key="brush", default="👍 Like", required=True)
-    # Selections report rows by their position in `table`, even after the viewer re-sorts columns.
-    st.dataframe(table, column_config=column_config, hide_index=True, height=cfg.table_height, key=key,
-                 on_select=partial(apply_brush, key, events_df["url"].tolist()), selection_mode="single-row")
+    table = pd.DataFrame({"👍": events_df["label"] == 1, "👎": events_df["label"] == -1, "P(like)": events_df["p_like"],
+                          "Theme": events_df["theme"], "City": events_df["city"], "Context": events_df["context"],
+                          "Event": events_df["description"], "Link": link})
+    column_config["👍"] = st.column_config.CheckboxColumn("👍", width="small")
+    column_config["👎"] = st.column_config.CheckboxColumn("👎", width="small")
+    # Edits are stored by row position, so the key changes whenever the row order can change (new events or a
+    # retrain); within one ordering, replaying the stored edits is harmless because they match the database.
+    order_key = f"{key}_{hash(tuple(events_df['url']))}_{model_meta['id'] if model_meta else 0}"
+    st.data_editor(table, column_config=column_config, hide_index=True, height=cfg.table_height, key=order_key,
+                   disabled=["P(like)", "Theme", "City", "Event", "Link"],
+                   on_change=apply_table_edits, args=(order_key, events_df))
 
 
 @st.fragment
@@ -283,11 +356,11 @@ if is_owner:
     owner_controls()
 
 st.header("Event map")
-render_event_map(gp, model_meta)
+map_section(gp, model_meta, is_owner)
 
 st.header("Events")
 if is_owner:
-    st.caption("Pick 👍 Like, 👎 Dislike or Clear, then tick the checkbox at the left of a row to label it. Click column headers to sort.")
+    st.caption("Tick 👍 or 👎 to label an event (neither = neutral), and edit Context to add what matters to you. Click column headers to sort.")
 events_section(gp, model_meta, is_owner)
 
 idle_pause()

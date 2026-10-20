@@ -31,10 +31,16 @@ model:
   min_events_to_train: 4
   kernel_constant: 1.0
   kernel_length_scale: 1.0
-  kernel_noise: 0.3
-  optimizer_restarts: 3
+  optimizer_restarts: 0
   random_state: 42
-  ei_xi: 0.01
+
+context:
+  model: claude-haiku-5-5
+  effort: low
+  batch_size: 20
+  max_tokens: 8000
+  input_cost_per_mtok: 0.10
+  output_cost_per_mtok: 0.50
 
 event_map:
   min_points: 5
@@ -47,6 +53,11 @@ event_map:
   surface_min_weight: 0.2
   width: 512
   height: 470
+
+explain:
+  max_evals: 500
+  color_floor: 0.05
+  mask_token: "..."
 
 app:
   idle_pause_seconds: 900

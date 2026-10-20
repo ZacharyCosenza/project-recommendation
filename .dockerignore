@@ -2,7 +2,6 @@ data/
 keys.md
 .git/
 .github/
-agentic_search.ipynb
 *.db
 *.png
 *_interactive.html

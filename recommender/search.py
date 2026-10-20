@@ -8,7 +8,7 @@ import anthropic
 import requests
 from anthropic import beta_tool
 
-from . import config, db, model, viz
+from . import config, context, db, model, viz
 
 cfg = config.search
 client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
@@ -97,8 +97,14 @@ def execute_run(conn, run_id, location, date_start, date_end, rows):
                 for k in usage:
                     usage[k] += q_usage[k]
                 if results:
-                    embs = model.embed_descriptions([v["description"] for v in results.values()])
-                    db.insert_events(conn, run_id, location, results, embs)
+                    descriptions = [v["description"] for v in results.values()]
+                    contexts, c_usage = context.extract(descriptions, date_start[:4])
+                    usage["cost_usd"] += c_usage["cost_usd"]
+                    # A context already saved for a re-discovered event wins (it may be a user's edit).
+                    saved = db.get_contexts(conn, list(results))
+                    contexts = [saved.get(url) or ctx for url, ctx in zip(results, contexts)]
+                    embs = model.embed_events(descriptions, contexts)
+                    db.insert_events(conn, run_id, location, results, embs, contexts)
                 db.update_run_progress(conn, run_id, usage)
             db.set_queries_done(conn, run_id, i + 1)
 

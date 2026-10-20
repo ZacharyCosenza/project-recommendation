@@ -40,6 +40,7 @@ def main():
             sys.exit(0)
 
     signal.signal(signal.SIGTERM, on_sigterm)
+    signal.signal(signal.SIGINT, on_sigterm)  # Fly stops machines with SIGINT by default
     idle_since = None
     while True:
         time.sleep(cfg.check_seconds)

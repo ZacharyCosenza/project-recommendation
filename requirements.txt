@@ -1,4 +1,4 @@
-anthropic>=0.69
+anthropic>=1.11
 requests>=2.32
 sentence-transformers>=3.0
 scikit-learn>=1.5
@@ -9,3 +9,4 @@ numpy>=1.26
 plotly>=5.24
 umap-learn>=0.5.7
 pyyaml>=6.0
+shap>=0.46

@@ -18,7 +18,7 @@ def _label(v):
 def to_frame(rows):
     return pd.DataFrame([{
         "url": r["url"], "run_id": r["run_id"], "city": r["city"], "theme": r["theme"],
-        "description": r["description"], "label": r["label"],
+        "description": r["description"], "context": r["context"], "label": r["label"],
         "embedding": np.frombuffer(r["embedding"], dtype=np.float32),
         "found_at": r["found_at"], "created_at": r["created_at"],
     } for r in rows])
@@ -54,10 +54,10 @@ def refresh_map_layout(conn):
         map_coords(conn, df, np.stack(df["embedding"].to_numpy()))
 
 
-def ei_surface(coords, ei, grid=cfg.surface_grid, bandwidth_frac=cfg.surface_bandwidth_frac,
+def score_surface(coords, score, grid=cfg.surface_grid, bandwidth_frac=cfg.surface_bandwidth_frac,
                min_weight=cfg.surface_min_weight):
-    # EI only exists at the events (it's computed in embedding space), so the surface is a
-    # Gaussian-weighted average of nearby events' EI, fading to 0 where no event is close enough.
+    # Scores only exist at the events (they're computed in embedding space), so the surface is a
+    # Gaussian-weighted average of nearby events' scores, fading to 0 where no event is close enough.
     lo, hi = coords.min(0), coords.max(0)
     pad = 0.08 * (hi - lo)
     lo, hi = lo - pad, hi + pad
@@ -69,46 +69,46 @@ def ei_surface(coords, ei, grid=cfg.surface_grid, bandwidth_frac=cfg.surface_ban
     d2 = ((pts[:, None, :] - coords[None, :, :].astype(np.float32)) ** 2).sum(-1)
     w = np.exp(-d2 / (2 * h * h))
     wsum = w.sum(1)
-    z = (w @ ei.astype(np.float32)) / np.maximum(wsum, 1e-12)
+    z = (w @ score.astype(np.float32)) / np.maximum(wsum, 1e-12)
     z *= np.minimum(1.0, wsum / min_weight)
     return xs, ys, z.reshape(grid, grid)
 
 
-def _hover_text(row, ei):
+def _hover_text(row, score):
     desc = row["description"]
     if len(desc) > 300:
         desc = desc[:300].rsplit(" ", 1)[0] + "..."
     lines = "<br>".join(html.escape(line) for line in textwrap.wrap(desc, 60))
-    score = "—" if ei is None or np.isnan(ei) else f"{ei:.3f}"
+    shown = "—" if score is None or np.isnan(score) else f"{score:.0%}"
     return (f"<b>{html.escape(row['theme'])}</b> · {html.escape(row['city'])}<br>{lines}"
-            f"<br>label {_label(row['label'])} · EI {score}")
+            f"<br>label {_label(row['label'])} · P(like) {shown}")
 
 
-def event_map(df, coords, recent_mask, ei=None):
-    ei_values = ei if ei is not None else np.full(len(df), np.nan)
-    hover = [_hover_text(row, e) for (_, row), e in zip(df.iterrows(), ei_values)]
+def event_map(df, coords, recent_mask, score=None):
+    values = score if score is not None else np.full(len(df), np.nan)
+    hover = [_hover_text(row, e) for (_, row), e in zip(df.iterrows(), values)]
     recent_mask = np.asarray(recent_mask)
     older = ~recent_mask
 
     fig = go.Figure()
-    if ei is not None:
-        xs, ys, z = ei_surface(coords, ei)
+    if score is not None:
+        xs, ys, z = score_surface(coords, score)
         fig.add_trace(go.Contour(
             x=xs, y=ys, z=z, colorscale="Viridis", ncontours=14, connectgaps=False,
-            # a few high-EI events would otherwise wash the rest of the map into one color
-            zmin=0.0, zmax=float(np.quantile(ei, 0.95)),
+            # a few near-certain likes would otherwise wash the rest of the map into one color
+            zmin=0.0, zmax=float(np.quantile(score, 0.95)),
             contours=dict(coloring="heatmap"), line=dict(width=0.6, color="rgba(255,255,255,0.35)"),
-            colorbar=dict(title="EI", thickness=12), hoverinfo="skip", showlegend=False,
+            colorbar=dict(title="P(like)", thickness=12, tickformat=".0%"), hoverinfo="skip", showlegend=False,
         ))
     fig.add_trace(go.Scatter(
         x=coords[older, 0], y=coords[older, 1], mode="markers", name="Earlier runs",
         marker=dict(size=6, color=GREY, opacity=0.6, line=dict(width=0.5, color="white")),
-        hovertext=[h for h, m in zip(hover, older) if m], hoverinfo="text",
+        hovertext=[h for h, m in zip(hover, older) if m], hoverinfo="text", customdata=df["url"][older],
     ))
     fig.add_trace(go.Scatter(
         x=coords[recent_mask, 0], y=coords[recent_mask, 1], mode="markers", name="Most recent run",
         marker=dict(size=9, color="white", line=dict(width=1.5, color="black")),
-        hovertext=[h for h, m in zip(hover, recent_mask) if m], hoverinfo="text",
+        hovertext=[h for h, m in zip(hover, recent_mask) if m], hoverinfo="text", customdata=df["url"][recent_mask],
     ))
     fig.update_layout(
         template="ggplot2", plot_bgcolor="white", width=cfg.width, height=cfg.height,
@@ -121,3 +121,15 @@ def event_map(df, coords, recent_mask, ei=None):
     fig.update_xaxes(**frame)
     fig.update_yaxes(**frame)
     return fig
+
+
+def highlight_html(tokens, values, floor):
+    # Shared scale per event, floored so a description with only tiny attributions stays pale.
+    scale = max(max((abs(v) for v in values), default=0.0), floor)
+    spans = []
+    for token, v in zip(tokens, values):
+        alpha = 0.65 * min(abs(v) / scale, 1.0)
+        rgb = "33,102,172" if v > 0 else "178,24,43"
+        spans.append(f'<span style="background:rgba({rgb},{alpha:.2f});border-radius:3px" '
+                     f'title="{v:+.3f}">{html.escape(token)}</span>')
+    return f'<div style="line-height:1.9">{"".join(spans)}</div>'
