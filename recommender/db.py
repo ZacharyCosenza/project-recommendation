@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS events (
     label             INTEGER NOT NULL DEFAULT 0 CHECK (label IN (-1, 0, 1)),
     label_updated_at  TEXT,
     context           TEXT NOT NULL DEFAULT '',
+    context_auto      TEXT NOT NULL DEFAULT '',
     found_at          TEXT NOT NULL,
     created_at        TEXT NOT NULL
 );
@@ -87,8 +88,11 @@ def init_db(conn):
     columns = {r["name"] for r in conn.execute("PRAGMA table_info(run_log)")}
     if "queries_done" not in columns:
         conn.execute("ALTER TABLE run_log ADD COLUMN queries_done INTEGER NOT NULL DEFAULT 0")
-    if "context" not in {r["name"] for r in conn.execute("PRAGMA table_info(events)")}:
+    event_columns = {r["name"] for r in conn.execute("PRAGMA table_info(events)")}
+    if "context" not in event_columns:
         conn.execute("ALTER TABLE events ADD COLUMN context TEXT NOT NULL DEFAULT ''")
+    if "context_auto" not in event_columns:
+        conn.execute("ALTER TABLE events ADD COLUMN context_auto TEXT NOT NULL DEFAULT ''")
     conn.commit()
 
 
@@ -168,28 +172,29 @@ def recent_runs(conn, limit=10):
 
 
 def get_contexts(conn, urls):
+    """{url: (context, context_auto)} for events already in the database."""
     if not urls:
         return {}
     marks = ",".join("?" * len(urls))
-    return dict(conn.execute(f"SELECT url, context FROM events WHERE url IN ({marks})", list(urls)).fetchall())
+    rows = conn.execute(f"SELECT url, context, context_auto FROM events WHERE url IN ({marks})", list(urls))
+    return {r["url"]: (r["context"], r["context_auto"]) for r in rows}
 
 
-def insert_events(conn, run_id, location, results, embeddings, contexts):
+def insert_events(conn, run_id, results, embeddings):
+    """results: {url: {theme, city, query_text, description, context, context_auto}}."""
     now = _now()
-    urls = list(results.keys())
     rows = [
         (
-            url, run_id, run_id, location,
-            results[url]["theme"], results[url]["query_text"], results[url]["description"], contexts[i],
-            embeddings[i].astype(np.float32).tobytes(), embeddings.shape[1], now, now,
+            url, run_id, run_id, r["city"] or "unknown", r["theme"], r["query_text"], r["description"],
+            r["context"], r["context_auto"], embeddings[i].astype(np.float32).tobytes(), embeddings.shape[1], now, now,
         )
-        for i, url in enumerate(urls)
+        for i, (url, r) in enumerate(results.items())
     ]
     conn.executemany(
         """
-        INSERT INTO events (url, run_id, first_run_id, city, theme, query_text, description, context,
+        INSERT INTO events (url, run_id, first_run_id, city, theme, query_text, description, context, context_auto,
                              embedding, embedding_dim, found_at, created_at)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(url) DO UPDATE SET
             run_id = excluded.run_id,
             city = excluded.city,
@@ -197,6 +202,7 @@ def insert_events(conn, run_id, location, results, embeddings, contexts):
             query_text = excluded.query_text,
             description = excluded.description,
             context = excluded.context,
+            context_auto = excluded.context_auto,
             embedding = excluded.embedding,
             embedding_dim = excluded.embedding_dim,
             found_at = excluded.found_at
@@ -297,3 +303,17 @@ def update_context(conn, url, context, embedding):
                  (context, embedding.astype(np.float32).tobytes(), len(embedding), url))
     conn.execute("DELETE FROM explanations WHERE url=?", (url,))
     conn.commit()
+
+
+def unreviewed_events(conn):
+    """Events still on the default neutral label: never given an explicit -1, 0 or 1."""
+    return conn.execute(
+        f"SELECT {EVENT_COLUMNS} FROM events WHERE label = 0 AND label_updated_at IS NULL "
+        "ORDER BY run_id DESC, created_at DESC"
+    ).fetchall()
+
+
+def review_counts(conn):
+    reviewed, total = conn.execute(
+        "SELECT SUM(label != 0 OR label_updated_at IS NOT NULL), COUNT(*) FROM events").fetchone()
+    return reviewed or 0, total

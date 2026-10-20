@@ -41,6 +41,7 @@ context:
   max_tokens: 8000
   input_cost_per_mtok: 0.10
   output_cost_per_mtok: 0.50
+  themes: [music, comedy, theater, arts & museums, food & drink, festivals & fairs, nightlife, sports, film, family, other]
 
 event_map:
   min_points: 5

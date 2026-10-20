@@ -1,9 +1,9 @@
-"""Fill in each event's context, re-embed every event as description + context, then rebuild the map and model.
+"""Re-extract every event's context, theme and city, re-embed as description + context, then rebuild the map and model.
 
-Run once after upgrading to context-aware embeddings: python refresh_context.py [--overwrite]
-Events that already have a context keep it unless --overwrite is given.
+Run after changing what goes into the context: python refresh_context.py
+A context the user edited (it differs from the last auto-extracted one) is kept as is.
 """
-import argparse
+from collections import defaultdict
 
 import numpy as np
 
@@ -11,22 +11,30 @@ from recommender import context, db, model, viz
 
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--overwrite", action="store_true", help="re-extract contexts that are already filled in")
-    args = parser.parse_args()
-
     conn = db.get_connection()
     db.init_db(conn)
-    rows = conn.execute("SELECT url, description, context, found_at FROM events").fetchall()
-    todo = [r for r in rows if args.overwrite or not r["context"]]
-    print(f"{len(rows)} events, extracting context for {len(todo)}")
+    rows = conn.execute(
+        "SELECT e.url, e.description, e.context, e.context_auto, e.found_at, r.location "
+        "FROM events e JOIN run_log r ON r.id = e.run_id"
+    ).fetchall()
+    by_location = defaultdict(list)
+    for r in rows:
+        by_location[r["location"]].append(r)
+    print(f"{len(rows)} events across {len(by_location)} search locations")
 
-    if todo:
-        contexts, usage = context.extract([r["description"] for r in todo], todo[0]["found_at"][:4])
-        conn.executemany("UPDATE events SET context=? WHERE url=?", [(c, r["url"]) for c, r in zip(contexts, todo)])
+    cost, kept = 0.0, 0
+    for location, group in by_location.items():
+        extracted, usage = context.extract([r["description"] for r in group], group[0]["found_at"][:4], location)
+        cost += usage["cost_usd"]
+        updates = []
+        for r, ex in zip(group, extracted):
+            edited = r["context_auto"] and r["context"] != r["context_auto"]
+            kept += bool(edited)
+            updates.append((r["context"] if edited else ex["context"], ex["context"], ex["theme"],
+                            ex["city"] or "unknown", r["url"]))
+        conn.executemany("UPDATE events SET context=?, context_auto=?, theme=?, city=? WHERE url=?", updates)
         conn.commit()
-        filled = sum(bool(c) for c in contexts)
-        print(f"context filled for {filled}/{len(todo)} events, ${usage['cost_usd']:.4f}")
+    print(f"extracted for {len(rows)} events (kept {kept} user-edited contexts), ${cost:.4f}")
 
     rows = conn.execute("SELECT url, description, context FROM events").fetchall()
     embs = model.embed_events([r["description"] for r in rows], [r["context"] for r in rows])

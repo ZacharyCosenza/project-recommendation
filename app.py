@@ -260,6 +260,54 @@ def render_event_table(gp, model_meta, events_df, editable, key):
                    on_change=apply_table_edits, args=(order_key, events_df))
 
 
+REVIEW_ORDERS = ["Newest search first", "Most uncertain first", "Highest P(like) first"]
+REVIEW_BUTTONS = {"👎 Dislike": -1, "😐 Neutral": 0, "👍 Like": 1}
+
+
+@st.fragment
+def review_section(gp, model_meta):
+    # A fragment, so each answer only redraws the card, not the map and table.
+    reviewed, total = db.review_counts(conn)
+    df = viz.to_frame(db.unreviewed_events(conn))
+    st.progress(reviewed / total if total else 1.0, text=f"{reviewed} reviewed · {len(df)} left")
+    if df.empty:
+        st.success("All caught up: every event has a label.")
+        return
+
+    order = st.segmented_control("Order", REVIEW_ORDERS, default=REVIEW_ORDERS[0], key="review_order",
+                                 label_visibility="collapsed") or REVIEW_ORDERS[0]
+    if gp is not None:
+        probs = model.class_probabilities(gp, np.stack(df["embedding"].to_numpy()))
+        df = df.assign(p_like=probs[:, 2], entropy=-(probs * np.log(np.clip(probs, 1e-12, 1))).sum(1))
+        if order == REVIEW_ORDERS[1]:
+            df = df.sort_values("entropy", ascending=False, kind="stable")
+        elif order == REVIEW_ORDERS[2]:
+            df = df.sort_values("p_like", ascending=False, kind="stable")
+    # Skipped events go to the back of the queue for this session only.
+    skipped = st.session_state.setdefault("review_skipped", [])
+    df = df.assign(skip_rank=df["url"].map({u: i + 1 for i, u in enumerate(skipped)}).fillna(0))
+    event = df.sort_values("skip_rank", kind="stable").iloc[0]
+
+    with st.container(border=True):
+        st.markdown(f"**{event['theme']}** · {event['city']}"
+                    + (f" · P(like) {event['p_like']:.0%}" if gp is not None else ""))
+        st.write(event["description"])
+        new_context = st.text_input("Context", value=event["context"], key=f"review_context_{event['url']}",
+                                    placeholder="e.g. Friday, comedy show, comedy, Chicago", help=CONTEXT_HELP)
+        if event["url"].startswith(("http://", "https://")):
+            st.markdown(f"[Open event page]({event['url']})")
+        cols = st.columns(len(REVIEW_BUTTONS) + 1)
+        for col, (name, value) in zip(cols, REVIEW_BUTTONS.items()):
+            if col.button(name, key=f"review_{value}", width="stretch"):
+                if new_context.strip() != event["context"]:
+                    save_context(event["url"], event["description"], new_context.strip())
+                db.update_label(conn, event["url"], value)
+                st.rerun(scope="fragment")
+        if cols[-1].button("Skip", key="review_skip", width="stretch"):
+            skipped.append(event["url"])
+            st.rerun(scope="fragment")
+
+
 @st.fragment
 def events_section(gp, model_meta, editable):
     # A fragment, so labeling a row reruns only this table instead of the whole page (map included).
@@ -309,7 +357,11 @@ def owner_controls():
             width="stretch",
         )
 
-        location = st.text_input("Location", value=config.search.default_location)
+        location = st.text_input(
+            "Location", value=config.search.default_location,
+            help="Added to every query. Use N/A to search each query as written, e.g. \"concerts NYC\" + "
+                 "\"concerts Boston\"; each event's city is read from its description either way.",
+        ).strip() or "N/A"
         date_range = st.date_input("Date range", value=(date.today(), date.today() + timedelta(days=config.search.default_days_ahead)))
         date_start, date_end = (date_range if isinstance(date_range, tuple) and len(date_range) == 2
                                  else (date_range, date_range))
@@ -360,7 +412,14 @@ map_section(gp, model_meta, is_owner)
 
 st.header("Events")
 if is_owner:
-    st.caption("Tick 👍 or 👎 to label an event (neither = neutral), and edit Context to add what matters to you. Click column headers to sort.")
-events_section(gp, model_meta, is_owner)
+    review_tab, table_tab = st.tabs(["Review", "All events"])
+    with review_tab:
+        review_section(gp, model_meta)
+    with table_tab:
+        st.caption("Tick 👍 or 👎 to label an event (neither = neutral), and edit Context to add what matters to you. "
+                   "Click column headers to sort.")
+        events_section(gp, model_meta, True)
+else:
+    events_section(gp, model_meta, False)
 
 idle_pause()

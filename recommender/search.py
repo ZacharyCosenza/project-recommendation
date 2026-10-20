@@ -50,6 +50,8 @@ def brave_search(query: str, count: int = cfg.brave_results) -> str:
 def refine_search(topic, location, date_start, date_end, max_results):
     today = date.today().isoformat()
     when = f"on {date_start}" if date_start == date_end else f"between {date_start} and {date_end}"
+    place = context.usable_location(location)
+    where = f" in {place}" if place else ""
     runner = client.beta.messages.tool_runner(
         model=cfg.model,
         max_tokens=cfg.max_tokens,
@@ -58,7 +60,7 @@ def refine_search(topic, location, date_start, date_end, max_results):
             "role": "user",
             "content": (
                 f"Today's date: {today}\n\n"
-                f"Find the best {max_results} current, specific events for: {topic} in {location}, "
+                f"Find the best {max_results} current, specific events for: {topic}{where}, "
                 f"happening {when}.\n\n"
                 f"Start with a broad brave_search call, then check the results. If they're too generic "
                 f"(no confirmed date/time/venue {when}), refine your query with more specific keywords — "
@@ -79,7 +81,7 @@ def refine_search(topic, location, date_start, date_end, max_results):
     text = re.sub(r"^```(?:json)?\n|\n```$", "", text.strip())
     usage["cost_usd"] = (usage["input_tokens"] * cfg.input_cost_per_mtok
                          + usage["output_tokens"] * cfg.output_cost_per_mtok) / 1e6
-    results = {url: {"description": d, "theme": topic, "query_text": topic} for url, d in json.loads(text).items()}
+    results = {url: {"description": d, "query_text": topic} for url, d in json.loads(text).items()}
     return results, usage
 
 
@@ -98,13 +100,16 @@ def execute_run(conn, run_id, location, date_start, date_end, rows):
                     usage[k] += q_usage[k]
                 if results:
                     descriptions = [v["description"] for v in results.values()]
-                    contexts, c_usage = context.extract(descriptions, date_start[:4])
+                    extracted, c_usage = context.extract(descriptions, date_start[:4], location)
                     usage["cost_usd"] += c_usage["cost_usd"]
-                    # A context already saved for a re-discovered event wins (it may be a user's edit).
                     saved = db.get_contexts(conn, list(results))
-                    contexts = [saved.get(url) or ctx for url, ctx in zip(results, contexts)]
-                    embs = model.embed_events(descriptions, contexts)
-                    db.insert_events(conn, run_id, location, results, embs, contexts)
+                    for (url, r), ex in zip(results.items(), extracted):
+                        current, auto = saved.get(url, ("", ""))
+                        # Keep a re-discovered event's context if the user edited it; otherwise take the new one.
+                        r.update(theme=ex["theme"], city=ex["city"], context_auto=ex["context"],
+                                 context=current if current and current != auto else ex["context"])
+                    embs = model.embed_events(descriptions, [r["context"] for r in results.values()])
+                    db.insert_events(conn, run_id, results, embs)
                 db.update_run_progress(conn, run_id, usage)
             db.set_queries_done(conn, run_id, i + 1)
 
