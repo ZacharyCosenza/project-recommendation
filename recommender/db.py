@@ -52,7 +52,8 @@ CREATE TABLE IF NOT EXISTS models (
     label_counts_json TEXT NOT NULL,
     y_best            REAL NOT NULL,
     model_blob        BLOB NOT NULL,
-    sklearn_version   TEXT
+    sklearn_version   TEXT,
+    calibration_json  TEXT
 );
 
 CREATE TABLE IF NOT EXISTS map_layout (
@@ -60,6 +61,14 @@ CREATE TABLE IF NOT EXISTS map_layout (
     x            REAL NOT NULL,
     y            REAL NOT NULL,
     computed_at  TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS daily_runs (
+    day          TEXT PRIMARY KEY,
+    started_at   TEXT NOT NULL,
+    finished_at  TEXT,
+    status       TEXT NOT NULL DEFAULT 'running' CHECK (status IN ('running','completed','failed')),
+    detail       TEXT
 );
 
 CREATE TABLE IF NOT EXISTS explanations (
@@ -71,6 +80,16 @@ CREATE TABLE IF NOT EXISTS explanations (
     PRIMARY KEY (url, model_id)
 );
 """
+
+# Columns added after the first deploy, created on databases that predate them.
+MIGRATIONS = {
+    "run_log": {"queries_done": "INTEGER NOT NULL DEFAULT 0"},
+    "events": {
+        "context": "TEXT NOT NULL DEFAULT ''",
+        "context_auto": "TEXT NOT NULL DEFAULT ''",
+    },
+    "models": {"calibration_json": "TEXT"},
+}
 
 
 def get_connection():
@@ -85,14 +104,11 @@ def get_connection():
 
 def init_db(conn):
     conn.executescript(SCHEMA)
-    columns = {r["name"] for r in conn.execute("PRAGMA table_info(run_log)")}
-    if "queries_done" not in columns:
-        conn.execute("ALTER TABLE run_log ADD COLUMN queries_done INTEGER NOT NULL DEFAULT 0")
-    event_columns = {r["name"] for r in conn.execute("PRAGMA table_info(events)")}
-    if "context" not in event_columns:
-        conn.execute("ALTER TABLE events ADD COLUMN context TEXT NOT NULL DEFAULT ''")
-    if "context_auto" not in event_columns:
-        conn.execute("ALTER TABLE events ADD COLUMN context_auto TEXT NOT NULL DEFAULT ''")
+    for table, added in MIGRATIONS.items():
+        columns = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+        for name, definition in added.items():
+            if name not in columns:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
     conn.commit()
 
 
@@ -267,6 +283,16 @@ def update_label(conn, url, label):
     conn.commit()
 
 
+def clear_label(conn, url):
+    """Back to never reviewed: the default neutral label with no timestamp."""
+    conn.execute("UPDATE events SET label=0, label_updated_at=NULL WHERE url=?", (url,))
+    conn.commit()
+
+
+def get_event(conn, url):
+    return conn.execute(f"SELECT {EVENT_COLUMNS} FROM events WHERE url=?", (url,)).fetchone()
+
+
 def get_map_layout(conn):
     return {r["url"]: (r["x"], r["y"]) for r in conn.execute("SELECT url, x, y FROM map_layout")}
 
@@ -291,9 +317,11 @@ def get_explanation(conn, url, model_id):
 
 
 def save_explanation(conn, url, model_id, tokens, values, base_value):
+    # The event may have been deleted (as a duplicate or generic listing) while it was being explained.
     conn.execute(
-        "INSERT OR REPLACE INTO explanations (url, model_id, tokens_json, values_json, base_value) VALUES (?,?,?,?,?)",
-        (url, model_id, json.dumps(tokens), json.dumps(values), base_value),
+        "INSERT OR REPLACE INTO explanations (url, model_id, tokens_json, values_json, base_value) "
+        "SELECT ?,?,?,?,? WHERE EXISTS (SELECT 1 FROM events WHERE url = ?)",
+        (url, model_id, json.dumps(tokens), json.dumps(values), base_value, url),
     )
     conn.commit()
 
@@ -317,3 +345,46 @@ def review_counts(conn):
     reviewed, total = conn.execute(
         "SELECT SUM(label != 0 OR label_updated_at IS NOT NULL), COUNT(*) FROM events").fetchone()
     return reviewed or 0, total
+
+
+def merge_duplicates(conn, keep, duplicates):
+    """Delete duplicates of keep, carrying their labels over to it.
+
+    Conflicting labels (a 👍 and a 👎 for the same event) reset keep to unreviewed so it comes back in the
+    Swipe queue. Returns True if that happened.
+    """
+    urls = [keep, *duplicates]
+    marks = ",".join("?" * len(urls))
+    rows = conn.execute(f"SELECT label, label_updated_at FROM events WHERE url IN ({marks})", urls).fetchall()
+    opinions = {r["label"] for r in rows if r["label"] != 0}
+    reviewed = [r["label_updated_at"] for r in rows if r["label_updated_at"]]
+    conflict = len(opinions) > 1
+    if conflict:
+        label, updated_at = 0, None
+    else:
+        label, updated_at = (opinions or {0}).pop(), max(reviewed, default=None)
+    conn.execute("UPDATE events SET label=?, label_updated_at=? WHERE url=?", (label, updated_at, keep))
+    delete_events(conn, duplicates)
+    return conflict
+
+
+def delete_events(conn, urls):
+    """Their cached explanations and map positions go with them (ON DELETE CASCADE)."""
+    conn.executemany("DELETE FROM events WHERE url=?", [(u,) for u in urls])
+    conn.commit()
+
+
+def claim_daily_run(conn, day):
+    """True if this call gets to run today's job; False if it already started (the scheduler may fire twice)."""
+    cur = conn.execute("INSERT OR IGNORE INTO daily_runs (day, started_at) VALUES (?, ?)", (day, _now()))
+    conn.commit()
+    return cur.rowcount == 1
+
+
+def finish_daily_run(conn, day, status, detail):
+    conn.execute("UPDATE daily_runs SET finished_at=?, status=?, detail=? WHERE day=?", (_now(), status, detail, day))
+    conn.commit()
+
+
+def last_daily_run(conn):
+    return conn.execute("SELECT * FROM daily_runs ORDER BY day DESC LIMIT 1").fetchone()

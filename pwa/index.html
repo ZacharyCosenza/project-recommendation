@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Events</title>
+<link rel="manifest" href="/pwa/manifest.json">
+<meta name="theme-color" content="#2166ac">
+<link rel="icon" href="/pwa/icons/icon-192.png">
+<link rel="stylesheet" href="/pwa/app.css">
+<script type="module" src="/pwa/app.js"></script>
+</head>
+<body>
+<header class="topbar">
+  <span class="title">Events</span>
+  <span id="progress" class="muted"></span>
+  <a href="/logout" class="muted signout">Sign out</a>
+</header>
+
+<main>
+  <section id="tab-swipe" class="tab active">
+    <div id="stack" class="stack"></div>
+    <div class="actions">
+      <button id="undo" class="small" title="Undo (Backspace)">↶ Undo</button>
+      <button id="dislike" class="round dislike" title="Dislike (←)">👎</button>
+      <button id="neutral" class="round neutral" title="Neutral (↑)">😐</button>
+      <button id="like" class="round like" title="Like (→)">👍</button>
+      <button id="skip" class="small" title="Skip (↓)">Skip ↷</button>
+    </div>
+  </section>
+
+  <section id="tab-search" class="tab scroll">
+    <div class="page">
+      <div id="search-banner"></div>
+      <div id="search-progress"></div>
+      <h2>New search</h2>
+      <div id="query-rows"></div>
+      <button id="add-query" class="small">+ Add query</button>
+      <label class="field">Location
+        <input id="location" autocomplete="off">
+        <span class="muted">Added to every query. Use N/A to search each query as written, e.g. "concerts NYC".</span>
+      </label>
+      <div class="two">
+        <label class="field">From <input id="date-start" type="date"></label>
+        <label class="field">To <input id="date-end" type="date"></label>
+      </div>
+      <p id="estimate" class="notice warning"></p>
+      <label class="check"><input id="confirm" type="checkbox"> I understand this calls paid APIs</label>
+      <button id="run-search" class="button" disabled>Run search</button>
+      <h2>History</h2>
+      <p id="spend" class="muted"></p>
+      <div id="runs"></div>
+    </div>
+  </section>
+
+  <section id="tab-analytics" class="tab scroll">
+    <div class="page wide">
+      <div class="model-line">
+        <span id="model-status" class="muted"></span>
+        <button id="retrain" class="button">Retrain</button>
+      </div>
+      <div id="retrain-banner"></div>
+      <h2>Event map</h2>
+      <div class="map-layout">
+        <div>
+          <p id="map-status" class="muted"></p>
+          <div id="map" class="chart"></div>
+        </div>
+        <div id="map-card" class="panel muted">Tap a dot to see why the model scores that event the way it does.</div>
+      </div>
+      <p class="muted">Events laid out by similarity of description + context. Background is P(like) spread from
+        nearby events (blue likely, red unlikely, white average): a reading aid, since the model only scores the
+        events themselves. White dots are the most recent search.</p>
+      <h2>Is P(like) honest?</h2>
+      <p id="calibration-caption" class="muted"></p>
+      <div id="calibration" class="chart"></div>
+      <h2>Events</h2>
+      <div class="filters">
+        <select id="events-view"><option value="recent">Most recent search</option><option value="all">All events</option></select>
+        <select id="events-city" hidden></select>
+        <select id="events-label" hidden>
+          <option value="">Any label</option><option value="1">👍 liked</option><option value="0">Neutral</option>
+          <option value="-1">👎 disliked</option>
+        </select>
+      </div>
+      <div id="events"></div>
+      <div class="pager" hidden>
+        <button id="prev-page" class="small">← Previous</button><span id="page-no" class="muted"></span>
+        <button id="next-page" class="small">Next →</button>
+      </div>
+    </div>
+  </section>
+</main>
+
+<nav class="tabbar">
+  <button data-tab="swipe" class="active">♥<span>Swipe</span></button>
+  <button data-tab="search">⌕<span>Search</span></button>
+  <button data-tab="analytics">◔<span>Analytics</span></button>
+</nav>
+</body>
+</html>

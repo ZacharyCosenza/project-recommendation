@@ -4,6 +4,7 @@ keys.md
 .github/
 *.db
 *.png
+!pwa/icons/*.png
 *_interactive.html
 docs/
 README.md

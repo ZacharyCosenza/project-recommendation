@@ -8,7 +8,7 @@ import anthropic
 import requests
 from anthropic import beta_tool
 
-from . import config, context, db, model, viz
+from . import config, context, db, dedupe, model, review, viz
 
 cfg = config.search
 client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
@@ -87,7 +87,7 @@ def refine_search(topic, location, date_start, date_end, max_results):
 
 def execute_run(conn, run_id, location, date_start, date_end, rows):
     usage = {"input_tokens": 0, "output_tokens": 0, "cost_usd": 0.0}
-    errors = []
+    errors, found = [], set()
     try:
         for i, row in enumerate(rows):
             topic = row["text"].strip()
@@ -99,25 +99,42 @@ def execute_run(conn, run_id, location, date_start, date_end, rows):
                 for k in usage:
                     usage[k] += q_usage[k]
                 if results:
-                    descriptions = [v["description"] for v in results.values()]
-                    extracted, c_usage = context.extract(descriptions, date_start[:4], location)
+                    extracted, c_usage = context.extract([r["description"] for r in results.values()],
+                                                         date_start[:4], location)
                     usage["cost_usd"] += c_usage["cost_usd"]
+                    # Generic listings (venue pages, calendars, roundups) are dropped, including a copy stored by
+                    # an earlier search.
+                    generic = {url for url, ex in zip(results, extracted) if ex["generic"]}
+                    db.delete_events(conn, generic)
                     saved = db.get_contexts(conn, list(results))
                     for (url, r), ex in zip(results.items(), extracted):
                         current, auto = saved.get(url, ("", ""))
                         # Keep a re-discovered event's context if the user edited it; otherwise take the new one.
                         r.update(theme=ex["theme"], city=ex["city"], context_auto=ex["context"],
                                  context=current if current and current != auto else ex["context"])
-                    embs = model.embed_events(descriptions, [r["context"] for r in results.values()])
-                    db.insert_events(conn, run_id, results, embs)
+                    results = {url: r for url, r in results.items() if url not in generic}
+                    if results:
+                        embs = model.embed_events([r["description"] for r in results.values()],
+                                                  [r["context"] for r in results.values()])
+                        db.insert_events(conn, run_id, results, embs)
+                        found.update(results)
                 db.update_run_progress(conn, run_id, usage)
             db.set_queries_done(conn, run_id, i + 1)
 
         status = "failed" if errors and len(errors) == len(rows) else "completed"
         try:
+            _, _, dedupe_cost = dedupe.dedupe(conn, only_urls=found)
+            usage["cost_usd"] += dedupe_cost
+        except Exception as e:
+            errors.append(f"dedupe: {e}")
+        try:
             viz.refresh_map_layout(conn)
         except Exception as e:
             errors.append(f"map layout: {e}")
+        try:
+            review.explain_unrated(conn)  # so the new cards arrive already coloured
+        except Exception as e:
+            errors.append(f"explanations: {e}")
     except Exception as e:
         # anything outside a single query (DB, embedding model) must still close the run out
         errors.append(f"unexpected: {e}")
@@ -126,17 +143,27 @@ def execute_run(conn, run_id, location, date_start, date_end, rows):
     db.finish_run(conn, run_id, status, usage, error="; ".join(errors) or None)
 
 
-def start_search(location, date_start, date_end, query_rows):
-    # Runs outside the Streamlit script, so reruns, other pages and closed tabs don't stop it.
+def _claim_run(location, date_start, date_end, query_rows):
     rows = [r for r in query_rows if str(r.get("text", "")).strip()]
     with _start_lock:
         conn = db.get_connection()
         if db.active_run(conn) is not None:
             raise SearchAlreadyRunning("A search is already running.")
-        run_id = db.start_run(conn, location, date_start, date_end, rows)
+        return db.start_run(conn, location, date_start, date_end, rows), rows
 
+
+def start_search(location, date_start, date_end, query_rows):
+    # Runs in the background, so closing the page doesn't stop it.
+    run_id, rows = _claim_run(location, date_start, date_end, query_rows)
     threading.Thread(
         target=execute_run, args=(db.get_connection(), run_id, location, date_start, date_end, rows),
         name=f"search-{run_id}", daemon=True,
     ).start()
+    return run_id
+
+
+def run_search(location, date_start, date_end, query_rows):
+    """start_search, but waits for the run to finish (for the daily job)."""
+    run_id, rows = _claim_run(location, date_start, date_end, query_rows)
+    execute_run(db.get_connection(), run_id, location, date_start, date_end, rows)
     return run_id

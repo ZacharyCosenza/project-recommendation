@@ -9,14 +9,15 @@ flowchart LR
     D --> C["context<br/>(day, type, theme, city)"]
     D --> E["embedding of<br/>description + context"]
     C --> E
-    E --> GP["Gaussian process<br/>classifier"]
+    E --> X["delete duplicates<br/>and generic listings"]
+    X --> GP["Gaussian process<br/>classifier"]
     GP --> R["rank by P(like)"]
     R --> U["I label 👎 / 😐 / 👍<br/>and edit context"]
     U --> GP
     U --> C
 ```
 
-Everything below uses the real data behind the [live app](https://event-recommender.fly.dev): 265 events from 14 searches across Chicago, New York, Monterrey, Reno and Philadelphia.
+Everything below uses the real data behind the app: 265 events from 14 searches across Chicago, New York, Monterrey, Reno and Philadelphia.
 
 # Building features with an agent
 
@@ -41,6 +42,10 @@ A small local model (`all-MiniLM-L6-v2`) then turns `description + " Context: " 
 
 ![Average similarity between events, grouped by theme](docs/images/similarity.png)
 
+**Cleaning up.** Web search returns the same event many times (the venue's page, two ticket sellers, a news story) and plenty of pages that aren't one event at all (venue calendars, "things to do" roundups, Facebook pages). Duplicates are cheap to shortlist with the embeddings: any two events with cosine similarity ≥ 0.80 are candidates. But similarity can't make the call by itself. "Blackhawks vs Penguins" and "Blackhawks vs Hurricanes" score 0.93 and are different games, while the same theater run on two sites can score as low as 0.82. So Haiku looks at each candidate group, decides which listings are the same event, and picks the one to keep (the organizer's or venue's own page if there is one). The rest are deleted, and a 👍 or 👎 on a deleted copy moves to the kept one; if the copies disagree, the event goes back into the swipe queue. On the live data this merged 26 listings into 17 events, e.g. 6 Great Italian Festival listings into 1. This matters for the model too: before merging, 10 duplicate groups had different labels on copies of the same event.
+
+The same Haiku pass that writes the context also flags *generic* listings, and those are deleted before they're ever stored. The flag is strict and sometimes catches a real show, but I'd rather see fewer, cleaner events.
+
 # Recommending with a Gaussian process classifier
 
 I've only labeled a few dozen events, way too little for the recommenders behind big apps. Instead I use a Gaussian process classifier: it learns from a handful of labels, gives probabilities instead of a hard yes/no, and naturally becomes less confident about events unlike anything I've labeled. Every label I give makes the next pick better. The real model works in all 384 dimensions, so to make it visible I squeeze everything onto one axis: similarity to "Oktoberfest Chicago in Fulton Market", an event I liked.
@@ -63,6 +68,12 @@ I've only labeled a few dozen events, way too little for the recommenders behind
 
 # The app
 
-The app shows the same thing in 2D: events laid out by similarity (UMAP) over a heat map of P(like). Clicking an event opens a card with its context (editable) and highlights which words push P(like) up (blue) or down (red). Labeling happens in two places. The **Review** tab flashes one unreviewed event at a time as a card: hit 👎, 😐 or 👍 (or skip) and the next one comes up, with a progress bar of how many are left. It goes newest search first by default, or most uncertain / highest P(like) first. Since 0 is also the default label, the app tracks which neutrals I actually chose, so an explicit 😐 leaves the queue and an untouched event stays in it. The **All events** table is for going back: one click on the 👍 or 👎 box, and any context can be edited in place. Editing a context re-embeds that event immediately, and the next retrain picks it up.
+The model only gets better if I keep rating, so the app is built around making that quick. It's a private web app that installs on my Android phone, with three tabs:
+
+- **Swipe**: one unrated event at a time, Tinder style. Right is 👍, left 👎, up 😐, with undo and skip. Each card shows P(like) and the description coloured by which words push P(like) up (blue) or down (red). Since 0 is also the default label, the app tracks which neutrals I actually chose, so an explicit 😐 leaves the queue and an untouched event stays in it.
+- **Search**: run a new search (queries, location, dates, with a cost estimate), follow it live, and see past runs.
+- **Analytics**: the event map below, where tapping an event opens the same coloured card with its context (editable); the calibration plot; and a table of every event for going back and fixing labels or context. Editing a context re-embeds that event immediately.
+
+Once a day the app retrains on my latest ratings, searches the default queries for the next week in New York, and pre-computes the word colouring for every new card, so there's a fresh stack waiting each morning.
 
 ![Event map: UMAP layout over a P(like) heat map](docs/images/event_map.png)

@@ -13,6 +13,8 @@ model = SimpleNamespace(**_settings["model"])
 context = SimpleNamespace(**_settings["context"])
 event_map = SimpleNamespace(**_settings["event_map"])
 explain = SimpleNamespace(**_settings["explain"])
+swipe = SimpleNamespace(**_settings["swipe"])
+daily = SimpleNamespace(**_settings["daily"])
 app = SimpleNamespace(**_settings["app"])
 auth = SimpleNamespace(**_settings["auth"])
 server = SimpleNamespace(**_settings["server"])
@@ -33,6 +35,8 @@ ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_KEY") or _keys.get("ANTHROPIC_KEY"
 BRAVE_API_KEY = os.environ.get("BRAVE_API") or _keys.get("BRAVE_API")
 # Optional: without it the site is read-only for everyone, including you.
 APP_PASSWORD = os.environ.get("APP_PASSWORD") or _keys.get("APP_PASSWORD")
+# Optional: lets the scheduler start the daily job (POST /api/cron/daily). Without it the daily job is off.
+CRON_TOKEN = os.environ.get("CRON_TOKEN") or _keys.get("CRON_TOKEN")
 
 if not ANTHROPIC_API_KEY or not BRAVE_API_KEY:
     raise RuntimeError(

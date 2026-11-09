@@ -5,7 +5,7 @@ swap_size_mb = 1024
 [build]
 
 [http_service]
-  internal_port = 8501
+  internal_port = 8080
   force_https = true
   auto_stop_machines = "off"
   auto_start_machines = true

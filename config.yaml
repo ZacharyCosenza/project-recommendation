@@ -12,7 +12,7 @@ search:
   brave_timeout_seconds: 10
   input_cost_per_mtok: 2.0
   output_cost_per_mtok: 10.0
-  default_location: Chicago
+  default_location: New York City
   default_days_ahead: 7
   default_queries:
     - {text: concerts, max_results: 5}
@@ -32,6 +32,7 @@ model:
   kernel_constant: 1.0
   kernel_length_scale: 1.0
   optimizer_restarts: 0
+  calibration_folds: 5
   random_state: 42
 
 context:
@@ -42,11 +43,22 @@ context:
   input_cost_per_mtok: 0.10
   output_cost_per_mtok: 0.50
   themes: [music, comedy, theater, arts & museums, food & drink, festivals & fairs, nightlife, sports, film, family, other]
+  duplicate_similarity: 0.80  # embedding cosine above which Haiku checks whether two listings are one event
+
+daily:
+  # Run once a day by the scheduler (see docs/PRODUCTION.md): retrain, search the default queries, colour the new cards.
+  max_results: 2  # per query
+  timezone: America/New_York  # whose "today" search windows start from (daily job and the Search tab)
+
+swipe:
+  queue_size: 5  # cards fetched at a time; their SHAP colouring is computed ahead
+  heartbeat_seconds: 30
 
 event_map:
   min_points: 5
   umap_neighbors: 15
   umap_min_dist: 0.1
+  calibration_bins: 6
   umap_metric: cosine
   umap_random_state: 42
   surface_grid: 120
@@ -61,19 +73,17 @@ explain:
   mask_token: "..."
 
 app:
-  idle_pause_seconds: 900
   seconds_per_query: 30
   cost_per_query: 0.065
-  table_height: 560
   page_size: 50
-  paused_page: /app/static/paused.html
 
 auth:
   max_failures: 5
   window_seconds: 600
+  cookie_days: 90  # how long a phone stays signed in
 
 server:
-  port: 8501
+  port: 8080
   idle_shutdown_seconds: 600
   check_seconds: 30
   heartbeat_fresh_seconds: 90

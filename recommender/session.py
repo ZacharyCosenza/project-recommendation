@@ -1,3 +1,4 @@
+import hashlib
 import hmac
 import threading
 import time
@@ -6,6 +7,7 @@ from . import config
 
 _lock = threading.Lock()
 _failures = []
+TOKEN_COOKIE = "owner"
 
 
 def heartbeat():
@@ -19,10 +21,6 @@ def browser_recently_open():
         return time.time() - config.HEARTBEAT_PATH.stat().st_mtime < config.server.heartbeat_fresh_seconds
     except FileNotFoundError:
         return False
-
-
-def owner_mode_available():
-    return bool(config.APP_PASSWORD)
 
 
 def locked_out():
@@ -43,3 +41,24 @@ def try_unlock(password):
     with _lock:
         _failures.append(time.time())
     return "wrong"
+
+
+def _token_key():
+    # Derived from the password, so changing APP_PASSWORD signs out every device.
+    return hmac.new(config.APP_PASSWORD.encode(), b"owner-cookie", hashlib.sha256).digest()
+
+
+def _sign(expiry):
+    return hmac.new(_token_key(), expiry.encode(), hashlib.sha256).hexdigest()
+
+
+def make_token():
+    expiry = str(int(time.time()) + config.auth.cookie_days * 86400)
+    return f"{expiry}.{_sign(expiry)}"
+
+
+def valid_token(token):
+    if not config.APP_PASSWORD or not token or "." not in token:
+        return False
+    expiry, signature = token.split(".", 1)
+    return expiry.isdigit() and int(expiry) > time.time() and hmac.compare_digest(signature, _sign(expiry))

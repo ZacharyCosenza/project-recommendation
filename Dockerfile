@@ -12,9 +12,9 @@ RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/wh
     && pip install --no-cache-dir -r requirements.txt
 
 COPY recommender/ recommender/
-COPY app.py serve.py refresh_context.py config.yaml ./
-COPY static/ static/
-COPY .streamlit/ .streamlit/
+COPY api.py serve.py refresh_context.py config.yaml ./
+COPY routes/ routes/
+COPY pwa/ pwa/
 
 RUN mkdir -p data
 

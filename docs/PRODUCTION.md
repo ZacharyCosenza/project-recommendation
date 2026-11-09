@@ -37,21 +37,64 @@ If you ever do run `fly launch`, double check it hasn't rewritten `fly.toml` and
 - `fly deploy --app event-recommender` — redeploy after code changes.
 - `fly ssh console --app event-recommender` then `ls -la /app/data` — confirm `events.db` is landing on the mounted volume, not the ephemeral root filesystem.
 
-## Sharing the site
+## Private app on your phone
 
-The live URL is the showcase: anyone with the link gets a read-only view (EI map, ranked events, live
-search progress). Editing — running searches, retraining, labeling, run history — unlocks per browser tab
-with a password set as a Fly secret, so it never lives in the code or the repo:
+The app is a private, installable web app (PWA): `api.py` (FastAPI, run by `serve.py`) serves the page in `pwa/`
+and the JSON API behind its Swipe, Search and Analytics tabs. Everything except the sign-in page, the app's static
+files and the daily-job hook needs a sign-in cookie. Sign-in uses a password set as a Fly secret:
 
 ```bash
 fly secrets set APP_PASSWORD='something-long' --app event-recommender
 ```
 
-Without `APP_PASSWORD` the site stays read-only for everyone. Five wrong attempts (from anyone, in any
-tab) lock unlocking for 10 minutes. Any tab — visitor or owner — swaps itself for a static "Paused" page
-after 15 minutes without mouse/keyboard/scroll activity (`app.idle_pause_seconds` in `config.yaml`), because an open
-Streamlit tab keeps reconnecting and would otherwise keep the machine running. Searches already in
-progress keep running.
+A sign-in lasts 90 days (`auth.cookie_days` in `config.yaml`); changing `APP_PASSWORD` signs out every device.
+Five wrong attempts lock sign-in for 10 minutes.
+
+To install on Android: open https://event-recommender.fly.dev in Chrome (not an in-app browser), sign in, then
+Chrome's ⋮ menu → **Install app**. It opens full screen from the home screen.
+
+While the app is on screen it pings the server every 30 s (`swipe.heartbeat_seconds`); about 10 minutes after it's
+closed, with no search running, the machine stops itself (`server.idle_shutdown_seconds`).
+
+## Daily job
+
+Once a day the app retrains on your latest ratings, searches the default queries (`search.default_queries` in
+`config.yaml`, `daily.max_results` events each, in `search.default_location` for the next
+`search.default_days_ahead` days) and pre-computes the SHAP colouring for every unrated card. That's about $0.65 a day.
+It runs at most once per New York calendar day; the latest run is in the `daily_runs` table.
+
+A Fly machine on a second, tiny app wakes the main app with `POST /api/cron/daily`, authorised by a shared token.
+One-time setup (the token goes straight from a file into both apps' secrets, never onto the screen):
+
+```bash
+python3 -c "import secrets; print('CRON_TOKEN=' + secrets.token_urlsafe(32))" > /tmp/cron.env
+fly secrets import --app event-recommender < /tmp/cron.env
+fly apps create event-recommender-cron --org <org-slug>
+fly secrets import --stage --app event-recommender-cron < /tmp/cron.env
+rm /tmp/cron.env
+fly machine run curlimages/curl:8.10.1 --app event-recommender-cron --region ord --schedule daily \
+  sh -c 'curl -fsS --max-time 300 -X POST -H "Authorization: Bearer $CRON_TOKEN" https://event-recommender.fly.dev/api/cron/daily'
+```
+
+Fly picks the time of day for `--schedule daily`. To run it now: `fly machine list --app event-recommender-cron`, then
+`fly machine start <id> --app event-recommender-cron`. Without `CRON_TOKEN` the endpoint refuses every call, so the
+daily job is simply off.
+
+## Re-extracting context and cleaning duplicates
+
+New searches extract context and delete generic listings and duplicates on their own. After changing
+the context prompt, the theme list or `context.duplicate_similarity` in `config.yaml`, redo it for every
+event already stored (Haiku, about 2¢ per 265 events):
+
+```bash
+fly ssh console --app event-recommender -C "sh -c 'cd /app && python -u refresh_context.py > /app/data/refresh.log 2>&1'"
+fly ssh console --app event-recommender -C "cat /app/data/refresh.log"
+```
+
+It re-extracts everything (keeping contexts you edited), deletes generic listings and duplicates, re-embeds,
+recomputes the map and retrains. The log lists every merge and any event whose copies had conflicting labels
+(those go back to the Swipe queue). Write to a log file as above: the run takes several minutes and the SSH session can
+drop before printed output comes back. Back up first (see below).
 
 ## Pausing and resuming
 

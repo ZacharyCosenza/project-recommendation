@@ -21,8 +21,7 @@ ANTHROPIC_KEY=sk-ant-...
 BRAVE_API=...
 ```
 
-No quotes, no spaces around `=`. Add `APP_PASSWORD=...` too if you want to be able to unlock editing
-(searching, retraining, labeling) from the sidebar; without it the app is read-only.
+No quotes, no spaces around `=`. Also add `APP_PASSWORD=...`: it's the password for signing in to the app.
 
 ## 4. Install and run
 
@@ -30,18 +29,19 @@ No quotes, no spaces around `=`. Add `APP_PASSWORD=...` too if you want to be ab
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-streamlit run app.py
+python serve.py
 ```
 
-Open http://localhost:8501. First run creates `data/events.db` automatically.
+Open http://localhost:8080 and sign in. First run creates `data/events.db` automatically.
 
-Every tunable setting (search model, default queries, GP kernel, map size, idle timeouts, ...) lives in
+Every tunable setting (search model, default queries, GP kernel, context themes, duplicate threshold, map size,
+idle timeouts, ...) lives in
 `config.yaml`; secrets never go there.
 
 ## Troubleshooting
 
 - **`RuntimeError: ANTHROPIC_KEY / BRAVE_API missing`** — `keys.md` isn't in the project root, or a line is missing/misspelled. Check it reads exactly `ANTHROPIC_KEY=...` and `BRAVE_API=...`, one per line.
 - **sentence-transformers download hangs on first run** — it's pulling the `all-MiniLM-L6-v2` model (~90MB) the first time; subsequent runs use the local cache.
-- **"Retrain Model" refuses to run** — needs at least 4 events and at least 2 distinct labels (-1/0/1) in the database. Run a search and label a few events first.
+- **Retrain refuses to run** — needs at least 4 events and at least 2 distinct labels (-1/0/1) in the database. Run a search and label a few events first.
 
 For deploying this somewhere other than your own machine, see `PRODUCTION.md`.
